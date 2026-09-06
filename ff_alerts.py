@@ -30,7 +30,7 @@ TZ = ZoneInfo("America/New_York")   # change if you are not on Eastern
 CURRENCIES = {"USD"}               # indices trader -> USD only
 IMPACTS = {"High", "Medium"}       # red + orange
 
-LEAD_MIN, LEAD_MAX = 8, 100000         # T-10 window (wide, GH cron drifts)
+LEAD_MIN, LEAD_MAX = 8, 20         # T-10 window (wide, GH cron drifts)
 PREOPEN_HOUR, PREOPEN_MIN = 9, 15  # NY AM pre-open ping
 WEEKAHEAD_HOUR = 7                 # Monday week-ahead
 
@@ -269,7 +269,6 @@ def week_ahead(events, now, state):
 def main():
     now = dt.datetime.now(TZ)
     state = load_state()
-    post(f"✅ Webhook test — it works. Local time is {now:%A %H:%M}")
 
     try:
         events = get_events()
