@@ -1,0 +1,42 @@
+name: FF Alerts
+
+on:
+  schedule:
+    # Every 5 minutes, 10:00-21:59 UTC, Monday-Friday.
+    # That window covers roughly 06:00-17:00 New York time all year,
+    # which is every session you care about. Running 24/7 wastes minutes.
+    - cron: "*/5 10-21 * * 1-5"
+
+  # Lets you press a button to run it manually. Used for testing.
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  alert:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Get the code
+        uses: actions/checkout@v4
+
+      - name: Install Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install requirements
+        run: pip install requests
+
+      - name: Run the alert script
+        env:
+          DISCORD_WEBHOOK: ${{ secrets.DISCORD_WEBHOOK }}
+        run: python ff_alerts.py
+
+      - name: Remember what was already sent
+        run: |
+          git config user.name  "ff-bot"
+          git config user.email "ff-bot@users.noreply.github.com"
+          git add state.json
+          git diff --staged --quiet || git commit -m "state update"
+          git push || true
