@@ -269,6 +269,7 @@ def week_ahead(events, now, state):
 def main():
     now = dt.datetime.now(TZ)
     state = load_state()
+    post(f"✅ Webhook test — it works. Local time is {now:%A %H:%M}")
 
     try:
         events = get_events()
