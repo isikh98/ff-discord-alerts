@@ -16,6 +16,9 @@
   "preopen|2026-09-15",
   "t10|2026-09-16T08:30:00-04:00|Core Retail Sales m/m",
   "t10|2026-09-16T08:30:00-04:00|Retail Sales m/m",
-  "preopen|2026-09-16"
+  "preopen|2026-09-16",
+  "t10|2026-09-16T14:00:00-04:00|Federal Funds Rate",
+  "t10|2026-09-16T14:00:00-04:00|FOMC Economic Projections",
+  "t10|2026-09-16T14:00:00-04:00|FOMC Statement"
  ]
 }
