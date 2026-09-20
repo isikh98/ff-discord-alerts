@@ -1,13 +1,13 @@
 """
-ForexFactory -> Discord alerts for SHER-E-PANJAB TRADERZ
+ForexFactory -> Discord alerts   |   SHER-E-PANJAB TRADERZ
 
-Posts:
-  1. T-10 warning before every red/orange USD event
-  2. NY AM pre-open brief at 09:15 ET
-  3. Monday week-ahead with difficulty warning
-  4. FOMC press conference day playbook
+Schedule
+  Sunday  22:00 ET   full week
+  Mon-Thu 22:00 ET   tomorrow's high impact + day instruction
+  ~30 min before each high impact release   one warning, once
 
-Runs on GitHub Actions every 5 minutes. No server needed.
+Day-type rules from the ICT 2026 Mentorship master rules file
+plus Iqbal's own FOMC session rule.
 """
 
 import json
@@ -25,37 +25,33 @@ import requests
 FEED_URL = "https://nfs.faireconomy.media/ff_calendar_thisweek.json"
 WEBHOOK = os.environ.get("DISCORD_WEBHOOK", "").strip()
 
-TZ = ZoneInfo("America/New_York")   # change if you are not on Eastern
+TZ = ZoneInfo("America/New_York")
 
-CURRENCIES = {"USD"}               # indices trader -> USD only
-IMPACTS = {"High", "Medium"}       # red + orange
+CURRENCIES = {"USD"}
+IMPACTS = {"High", "Medium"}
 
-LEAD_MIN, LEAD_MAX = 8, 20         # T-10 window (wide, GH cron drifts)
-PREOPEN_HOUR, PREOPEN_MIN = 9, 15  # NY AM pre-open ping
-WEEKAHEAD_HOUR = 7                 # Monday week-ahead
+WARN_ONLY_HIGH = True        # False = warn on medium impact too
+LEAD_MIN, LEAD_MAX = 25, 45  # the "30 minutes before" window
+NIGHT_HOUR = 22              # 10pm ET
 
 STATE_FILE = "state.json"
 
-# Events that make a week hard to trade
-HARD_WEEK = ["Non-Farm", "Nonfarm", "NFP", "FOMC", "CPI", "Federal Funds"]
-
-# Events that trigger the FOMC day playbook
+NFP_KEYS = ["Non-Farm", "Nonfarm", "NFP"]
 FOMC_KEYS = ["FOMC Press Conference", "Federal Funds Rate", "FOMC Statement"]
 
 
 # ----------------------------------------------------------------------
-# HELPERS
+# PLUMBING
 # ----------------------------------------------------------------------
 
 def post(msg):
-    """Send a message to Discord. Splits if over the 2000 char limit."""
     if not WEBHOOK:
-        print("NO WEBHOOK SET -- would have posted:\n" + msg)
+        print("NO WEBHOOK -- would post:\n" + msg)
         return
     for chunk in [msg[i:i + 1900] for i in range(0, len(msg), 1900)]:
         r = requests.post(WEBHOOK, json={"content": chunk}, timeout=20)
         if r.status_code >= 300:
-            print(f"Discord error {r.status_code}: {r.text}", file=sys.stderr)
+            print(f"Discord {r.status_code}: {r.text}", file=sys.stderr)
 
 
 def load_state():
@@ -66,23 +62,13 @@ def load_state():
         return {"sent": []}
 
 
-def save_state(state):
-    # keep the file small - only this week matters
-    state["sent"] = state["sent"][-300:]
+def save_state(s):
+    s["sent"] = s["sent"][-300:]
     with open(STATE_FILE, "w") as f:
-        json.dump(state, f, indent=1)
-
-
-def already(state, key):
-    return key in state["sent"]
-
-
-def mark(state, key):
-    state["sent"].append(key)
+        json.dump(s, f, indent=1)
 
 
 def get_events():
-    """Pull the weekly feed and return parsed, filtered events in ET."""
     r = requests.get(FEED_URL, timeout=30,
                      headers={"User-Agent": "Mozilla/5.0"})
     r.raise_for_status()
@@ -96,13 +82,9 @@ def get_events():
             when = dt.datetime.fromisoformat(e["date"]).astimezone(TZ)
         except Exception:
             continue
-        out.append({
-            "title": e.get("title", "?"),
-            "when": when,
-            "impact": e.get("impact"),
-            "forecast": e.get("forecast") or "-",
-            "previous": e.get("previous") or "-",
-        })
+        out.append({"title": e.get("title", "?"),
+                    "when": when,
+                    "impact": e.get("impact")})
     return sorted(out, key=lambda x: x["when"])
 
 
@@ -110,158 +92,160 @@ def dot(impact):
     return "🔴" if impact == "High" else "🟠"
 
 
-def line(e):
-    return (f"{dot(e['impact'])} `{e['when']:%H:%M}` **{e['title']}** "
-            f"(f: {e['forecast']} / p: {e['previous']})")
+def row(e):
+    return f"`{e['when']:%H:%M}` {dot(e['impact'])} **{e['title']}**"
 
 
-def is_fomc_day(events, today):
-    return any(
-        e["when"].date() == today and
-        any(k.lower() in e["title"].lower() for k in FOMC_KEYS)
-        for e in events
-    )
+def has(events, keys, day=None):
+    for e in events:
+        if day and e["when"].date() != day:
+            continue
+        if any(k.lower() in e["title"].lower() for k in keys):
+            return e
+    return None
+
+
+# ----------------------------------------------------------------------
+# DAY CLASSIFICATION
+# ----------------------------------------------------------------------
+
+def day_note(events, day):
+    """Instruction block for a given date. Order = precedence."""
+
+    todays = [e for e in events if e["when"].date() == day]
+    highs = [e for e in todays if e["impact"] == "High"]
+    dow = day.weekday()
+
+    if has(events, FOMC_KEYS, day):
+        return ("FOMC day. Only overnight, before 09:30, "
+                "and after 14:30 are tradeable.")
+
+    if has(events, NFP_KEYS, day):
+        return ("NFP at 08:30. The number is unreliable and gets revised — "
+                "the volatility is what matters.\n"
+                "Take a low-hanging-fruit objective, not an ambitious one.")
+
+    if has(events, NFP_KEYS):                      # NFP somewhere this week
+        if dow == 0:
+            return ("NFP week. Monday is the reliable day — everyone takes "
+                    "their piece early to avoid Thursday and Friday.\n"
+                    "Be focused. Actively look for a setup.")
+        if dow == 2:
+            return ("NFP week. ICT's safe zone closes at 11:00 — past that "
+                    "the week's objective is usually already hit.\n"
+                    "You trade through it. Just know what you're in.")
+        if dow == 3:
+            return ("NFP week Thursday. Expect positioning into tomorrow's "
+                    "08:30 rather than clean delivery.")
+        return "NFP week. Tuesday is tradeable — normal session."
+
+    ten = [e for e in highs if e["when"].hour == 10 and e["when"].minute == 0]
+    if ten:
+        return ("Sit out the first 30 minutes. Let liquidity or inefficiency "
+                "build into the release, let it print, then trade what's "
+                "left behind.\n10:30 — dealing range in place, algos fire.")
+
+    if dow == 0 and not highs:
+        return ("Not NFP week. Monday is a lottery — it can work, but don't "
+                "demand a setup of yourself.")
+
+    if highs:
+        names = ", ".join(sorted({e["title"] for e in highs}))
+        return (f"High impact — {names}.\n"
+                "Large interference in normal price movement around it.")
+
+    if todays:
+        return "Medium impact only. Trade the full session."
+
+    return "Nothing scheduled. Rely purely on price action — normal and fine."
 
 
 # ----------------------------------------------------------------------
 # ALERTS
 # ----------------------------------------------------------------------
 
-def t_minus_10(events, now, state):
-    """Warn ~10 min before each red/orange event."""
+def warn_before(events, now, state):
+    """One grouped warning ~30 min ahead. Same-time events share a message."""
+    groups = {}
     for e in events:
+        if WARN_ONLY_HIGH and e["impact"] != "High":
+            continue
         mins = (e["when"] - now).total_seconds() / 60
-        if not (LEAD_MIN <= mins <= LEAD_MAX):
+        if LEAD_MIN <= mins <= LEAD_MAX:
+            groups.setdefault(e["when"], []).append(e)
+
+    for when, evs in groups.items():
+        key = f"warn|{when.isoformat()}"
+        if key in state["sent"]:
             continue
-        key = f"t10|{e['when'].isoformat()}|{e['title']}"
-        if already(state, key):
-            continue
-        post(
-            f"{dot(e['impact'])} **{int(mins)} MIN WARNING**\n"
-            f"**{e['title']}** at `{e['when']:%H:%M} ET`\n"
-            f"Forecast {e['forecast']} · Previous {e['previous']}\n\n"
-            f"🚫 No entries from `{e['when'] - dt.timedelta(minutes=15):%H:%M}` "
-            f"to `{e['when'] + dt.timedelta(minutes=15):%H:%M}` ET.\n"
-            f"If you are in a position: no adds, stop stays where it is."
-        )
-        mark(state, key)
+        mins = int((when - now).total_seconds() / 60)
+        names = "\n".join(f"{dot(e['impact'])} **{e['title']}**" for e in evs)
+        post(f"**{mins} MIN** — `{when:%H:%M} ET`\n{names}")
+        state["sent"].append(key)
 
 
-def pre_open(events, now, state):
-    """09:15 ET — what is left today before the 09:30 open."""
-    key = f"preopen|{now.date()}"
-    if already(state, key):
+def night_before(events, now, state):
+    """22:00 ET — tomorrow's high impact plus the day instruction."""
+    if not (now.hour == NIGHT_HOUR and now.minute < 30):
         return
-    if not (now.hour == PREOPEN_HOUR and PREOPEN_MIN <= now.minute < PREOPEN_MIN + 20):
+    if now.weekday() in (4, 5, 6):        # Fri/Sat handled below, Sun = week
         return
 
-    today = now.date()
-    todays = [e for e in events if e["when"].date() == today]
-    later = [e for e in todays if e["when"] >= now]
+    tom = (now + dt.timedelta(days=1)).date()
+    key = f"night|{tom}"
+    if key in state["sent"]:
+        return
 
-    msg = [f"⏰ **NY AM OPEN IN 15 MIN** — {now:%A %d %b}\n"]
+    todays = [e for e in events if e["when"].date() == tom]
+    highs = [e for e in todays if e["impact"] == "High"]
 
-    if is_fomc_day(events, today):
-        msg.append(fomc_playbook(todays))
-    elif any(e["impact"] == "High" and e["when"].hour < 12 for e in todays):
-        msg.append("🔴 **SKIP DAY** — high impact release this morning.")
-        msg.append("Your rule: no NY AM session. Do not look for a reason around it.\n")
-    elif later:
-        msg.append("🟡 **NORMAL DAY — closed windows below**\n")
+    msg = [f"**TOMORROW · {tom:%A %-d %b}**\n"]
+    if highs:
+        msg += [row(e) for e in highs]
     else:
-        msg.append("🟢 **CLEAN** — nothing red or orange left today.\n")
-
-    if later:
-        msg.append("**Still to come:**")
-        msg += [line(e) for e in later]
-        msg.append("")
-        msg.append("**No-entry windows (±15 min):**")
-        msg += [f"`{e['when'] - dt.timedelta(minutes=15):%H:%M}`–"
-                f"`{e['when'] + dt.timedelta(minutes=15):%H:%M}` {e['title']}"
-                for e in later]
-
-    msg.append(
-        "\n**The gate — all must be true:**\n"
-        "SSMT present · HTF orderflow aligned · correct side of True Open · "
-        "PSP confirmation · stop in the platform, not in your head."
-    )
+        msg.append("_No high impact events_")
+    msg.append("")
+    msg.append(day_note(events, tom))
 
     post("\n".join(msg))
-    mark(state, key)
-
-
-def fomc_playbook(todays):
-    """The special FOMC press conference day rules."""
-    return (
-        "🔴🔴 **FOMC PRESS CONFERENCE DAY**\n\n"
-        "**NO NY AM SESSION.** 09:30–14:00 is chop and consolidation. "
-        "The market is waiting, not trending.\n\n"
-        "**Your plan today:**\n"
-        "• Pre-market only — trade before `08:30 ET`, be flat and done by `08:30`\n"
-        "• `14:00` Federal Funds Rate — this is **manipulation**, not direction. "
-        "Let it sweep SSL/BSL. Do not trade into it.\n"
-        "• `14:30` press conference — real move usually begins here, "
-        "once liquidity has been taken\n"
-        "• **Trade after 14:30**, not before\n\n"
-        "If you find yourself clicking at 10:15 today, that is tilt, not a setup.\n"
-    )
+    state["sent"].append(key)
 
 
 def week_ahead(events, now, state):
-    """Monday 07:00 ET — the whole week, plus a difficulty read."""
+    """Sunday 22:00 ET — the whole week."""
+    if now.weekday() != 6:
+        return
+    if not (now.hour == NIGHT_HOUR and now.minute < 30):
+        return
     key = f"week|{now.date()}"
-    if already(state, key):
-        return
-    if now.weekday() != 0:
-        return
-    if not (now.hour == WEEKAHEAD_HOUR and now.minute < 20):
+    if key in state["sent"]:
         return
 
-    high = [e for e in events if e["impact"] == "High"]
-    hard = [e for e in high
-            if any(k.lower() in e["title"].lower() for k in HARD_WEEK)]
+    msg = [f"**WEEK AHEAD · {now:%-d %b}**\n"]
 
-    msg = [f"📅 **WEEK AHEAD** — week of {now:%d %b}\n"]
+    if has(events, NFP_KEYS):
+        msg.append("**NFP week.** Monday focused · Tuesday tradeable · "
+                   "Wednesday safe zone to 11:00 · Thursday and Friday "
+                   "distorted by the 08:30 print.\n")
+    f = has(events, FOMC_KEYS)
+    if f:
+        msg.append(f"**FOMC {f['when']:%A}.** Overnight, before 09:30, "
+                   "and after 14:30 only.\n")
 
-    if hard:
-        names = ", ".join(sorted({e["title"] for e in hard}))
-        msg.append(
-            f"⚠️ **HARD WEEK.** This week has: **{names}**\n\n"
-            "Expect compression and false moves on the days *before* the print. "
-            "Ranges tighten, liquidity sits untouched, setups look valid and fail. "
-            "Size down or sit out the lead-up. The real range usually comes "
-            "after the event, not before it.\n"
-        )
-    else:
-        msg.append(
-            "🟢 **No NFP / FOMC / CPI this week.**\n\n"
-            "Expect a shorter range and less follow-through. No big runs. "
-            "Take what the week gives you — do not force size looking for a "
-            "move that is not scheduled.\n"
-        )
+    cur = None
+    any_ev = False
+    for e in events:
+        any_ev = True
+        if e["when"].date() != cur:
+            cur = e["when"].date()
+            msg.append(f"\n__{e['when']:%A %-d %b}__")
+        msg.append(row(e))
 
-    if high:
-        msg.append("**Red folder this week:**")
-        cur = None
-        for e in high:
-            if e["when"].date() != cur:
-                cur = e["when"].date()
-                msg.append(f"\n__{e['when']:%A %d %b}__")
-            msg.append(line(e))
-    else:
-        msg.append("No red folder events on the calendar.")
-
-    fomc = [e["when"] for e in high
-            if any(k.lower() in e["title"].lower() for k in FOMC_KEYS)]
-    if fomc:
-        msg.append(
-            f"\n🔴 **FOMC this week — {min(fomc):%A}.** "
-            "No NY AM that day. Pre-market before 08:30 only, "
-            "then wait for 14:30."
-        )
+    if not any_ev:
+        msg.append("Calendar is empty. Price action only.")
 
     post("\n".join(msg))
-    mark(state, key)
+    state["sent"].append(key)
 
 
 # ----------------------------------------------------------------------
@@ -269,17 +253,14 @@ def week_ahead(events, now, state):
 def main():
     now = dt.datetime.now(TZ)
     state = load_state()
-
     try:
         events = get_events()
     except Exception as exc:
         print(f"Feed failed: {exc}", file=sys.stderr)
         return
-
     week_ahead(events, now, state)
-    pre_open(events, now, state)
-    t_minus_10(events, now, state)
-
+    night_before(events, now, state)
+    warn_before(events, now, state)
     save_state(state)
 
 
